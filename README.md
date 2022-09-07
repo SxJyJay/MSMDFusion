@@ -2,7 +2,7 @@
 MSMDFusion: Connecting LiDAR and Camera at Multiple Scales with Multi-depth Seeds for 3D Object Detection
 
 ## News
-- (2022.8.11) Our MSMDFusion ranks 2nd on nuScenes leaderboard among all methods that don't use TTA and Ensemble. 
+- (2022.8.11) Our MSMDFusion ranks 2nd and 1st in the term of NDS and mAP on the nuScenes leaderboard among all methods that don't use TTA and Ensemble. 
 
 ## Performances on nuScenes
 |  model   | Modality | mAP | NDS | 
