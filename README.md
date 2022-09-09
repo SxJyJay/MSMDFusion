@@ -11,7 +11,7 @@ MSMDFusion: Fusing LiDAR and Camera at Multiple Scales with Multi-Depth Seeds fo
 | MSMDFusion-T (val)  | LC | 69.06 | 71.77 |
 | MSMDFusion-T (test)  | LC | 70.84 | 73.17 | 
 
-## Acknoledgement
+## Acknowledgement
 We sincerely appreciate the following open-source projects for providing valuable and high-quality codes: 
 - [mmdetection3d](https://github.com/open-mmlab/mmdetection3d)
 - [TrasnFusion](https://github.com/XuyangBai/TransFusion)
