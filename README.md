@@ -9,7 +9,7 @@ MSMDFusion: Fusing LiDAR and Camera at Multiple Scales with Multi-Depth Seeds fo
 |  model   | Modality | mAP | NDS | 
 |  :----:  | :----:  |  :----:  |  :----:  |
 | MSMDFusion-T (val)  | LC | 69.06 | 71.77 |
-| MSMDFusion-T (test)  | LC | 70.84 | 73.43 | 
+| MSMDFusion-T (test)  | LC | 70.84 | 73.17 | 
 
 ## Acknoledgement
 We sincerely appreciate the following open-source projects for providing valuable and high-quality codes: 
