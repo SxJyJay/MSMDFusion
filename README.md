@@ -3,7 +3,7 @@ MSMDFusion: Fusing LiDAR and Camera at Multiple Scales with Multi-Depth Seeds fo
 
 ## Paper
 - **[MSMDFusion: Fusing LiDAR and Camera at Multiple Scales with Multi-Depth Seeds for 3D Object Detection](https://arxiv.org/abs/2209.03102)**
-  - *Yang Jiao, Zequn Jie, Jingjing Chen, Xiaolin Wei, Lin Ma, Yu-Gang Jiang*
+  - *Yang Jiao, Zequn Jie, Shaoxiang Chen, Jingjing Chen, Xiaolin Wei, Lin Ma, Yu-Gang Jiang*
 
 
 ## News
