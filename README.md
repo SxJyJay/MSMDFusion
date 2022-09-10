@@ -1,6 +1,11 @@
 # MSMDFusion
 MSMDFusion: Fusing LiDAR and Camera at Multiple Scales with Multi-Depth Seeds for 3D Object Detection.
 
+## Paper
+- **[MSMDFusion: Fusing LiDAR and Camera at Multiple Scales with Multi-Depth Seeds for 3D Object Detection](https://arxiv.org/abs/2209.03102)**
+  - *Yang Jiao, Zequn Jie, Jingjing Chen, Xiaolin Wei, Lin Ma, Yu-Gang Jiang*
+
+
 ## News
 - (2022.8.11) Our MSMDFusion ranks 2nd and 1st in the term of NDS and mAP on the nuScenes leaderboard among all methods that don't use TTA and Ensemble. 
 - (2022.9.7) The paper of MSMDFusion is released on the [arxiv](https://arxiv.org/abs/2209.03102).
