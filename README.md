@@ -26,9 +26,10 @@ We sincerely appreciate the following open-source projects for providing valuabl
 ## Reference
 If you find our paper useful, please kindly cite us via:
 ```
-@inproceedings{Jiao2022MSMDFusionFL,
+@article{jiao2022msmdfusion,
   title={MSMDFusion: Fusing LiDAR and Camera at Multiple Scales with Multi-Depth Seeds for 3D Object Detection},
-  author={Yang Jiao and Zequn Jie and Shaoxiang Chen and Jingjing Chen and Xiaolin Wei and Lin Ma and Yu-Gang Jiang},
+  author={Jiao, Yang and Jie, Zequn and Chen, Shaoxiang and Chen, Jingjing and Wei, Xiaolin and Ma, Lin and Jiang, Yu-Gang},
+  journal={arXiv preprint arXiv:2209.03102},
   year={2022}
 }
 ```
