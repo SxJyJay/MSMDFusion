@@ -3,7 +3,7 @@ MSMDFusion: A Gated Multi-Scale LiDAR-Camera Fusion Framework with Multi-Depth S
 
 ## Paper
 - **[MSMDFusion: A Gated Multi-Scale LiDAR-Camera Fusion Framework with Multi-Depth Seeds for 3D Object Detection.](https://arxiv.org/abs/2209.03102)**
-  - *Yang Jiao, Zequn Jie, Shaoxiang Chen, Jingjing Chen, Xiaolin Wei, Lin Ma, Yu-Gang Jiang*
+  - *Yang Jiao, Zequn Jie, Shaoxiang Chen, Jingjing Chen, Lin Ma, Yu-Gang Jiang*
 
 
 ## News
