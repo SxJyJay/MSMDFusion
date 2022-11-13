@@ -1,20 +1,27 @@
 # MSMDFusion
-MSMDFusion: Fusing LiDAR and Camera at Multiple Scales with Multi-Depth Seeds for 3D Object Detection.
+MSMDFusion: A Gated Multi-Scale LiDAR-Camera Fusion Framework with Multi-Depth Seeds for 3D Object Detection.
 
 ## Paper
-- **[MSMDFusion: Fusing LiDAR and Camera at Multiple Scales with Multi-Depth Seeds for 3D Object Detection](https://arxiv.org/abs/2209.03102)**
+- **[MSMDFusion: A Gated Multi-Scale LiDAR-Camera Fusion Framework with Multi-Depth Seeds for 3D Object Detection.](https://arxiv.org/abs/2209.03102)**
   - *Yang Jiao, Zequn Jie, Shaoxiang Chen, Jingjing Chen, Xiaolin Wei, Lin Ma, Yu-Gang Jiang*
 
 
 ## News
 - (2022.8.11) Our MSMDFusion ranks 2nd and 1st in the term of NDS and mAP on the nuScenes leaderboard among all methods that don't use TTA and Ensemble. 
 - (2022.9.7) The paper of MSMDFusion is released on the [arxiv](https://arxiv.org/abs/2209.03102).
+- (2022.11.12) Our improved version, MSMDFusion-base, ranks 1st in the term of NDS on the nuScenes leaderboard among all submissions that don't use TTA and Ensemble. MSMDFusion-base also achieve impressive results on the nuScenes tracking task by combining a simple greedy tracker.
 
-## Performances on nuScenes
+## Performances on nuScenes detection track
 |  model   | Modality | mAP | NDS | 
 |  :----:  | :----:  |  :----:  |  :----:  |
-| MSMDFusion-T (val)  | LC | 69.06 | 71.77 |
-| MSMDFusion-T (test)  | LC | 70.84 | 73.17 | 
+| MSMDFusion (val)  | LC | 69.1 | 71.8 |
+| MSMDFusion (test)  | LC | 70.8 | 73.2 |
+| MSMDFusion-base (test) | LC | 71.5 | 74.0 |
+
+## Performances on nuScenes tracking task
+|  model   | Modality | AMOTA | AMOTP | 
+|  :----:  | :----:  |  :----:  |  :----:  |
+| MSMDFusion-base (test)  | LC | 74.0 | 0.549 |
 
 ## Acknowledgement
 We sincerely appreciate the following open-source projects for providing valuable and high-quality codes: 
@@ -22,7 +29,8 @@ We sincerely appreciate the following open-source projects for providing valuabl
 - [TrasnFusion](https://github.com/XuyangBai/TransFusion)
 - [MVP](https://github.com/tianweiy/MVP)
 - [CenterPoint](https://github.com/tianweiy/CenterPoint)
-
+- [BEVFusion](https://github.com/ADLab-AutoDrive/BEVFusion)
+- [BEVFusion](https://github.com/mit-han-lab/bevfusion)
 ## Reference
 If you find our paper useful, please kindly cite us via:
 ```
