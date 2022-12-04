@@ -9,7 +9,7 @@ MSMDFusion: A Gated Multi-Scale LiDAR-Camera Fusion Framework with Multi-Depth S
 ## News
 - (2022.8.11) Our MSMDFusion ranks 2nd and 1st in the term of NDS and mAP on the nuScenes leaderboard among all methods that don't use TTA and Ensemble. 
 - (2022.9.7) The paper of MSMDFusion is released on the [arxiv](https://arxiv.org/abs/2209.03102).
-- (2022.11.12) Our improved version, MSMDFusion-base, ranks 1st in the term of NDS on the nuScenes leaderboard among all submissions that don't use TTA and Ensemble. MSMDFusion-base also achieve impressive results on the nuScenes tracking task by combining a simple greedy tracker. The latest arxiv version contains detials of the improved MSMDFusion-base.
+- (2022.11.12) Our improved version, MSMDFusion-base, ranks 1st in the term of NDS on the nuScenes leaderboard among all submissions that don't use TTA and Ensemble. MSMDFusion-base also achieve impressive results on the nuScenes tracking task by combining a simple greedy tracker. The latest [arxiv](https://arxiv.org/abs/2209.03102) version contains detials of the improved MSMDFusion-base.
 
 ## Performances on nuScenes detection track
 |  model   | Modality | mAP | NDS | 
