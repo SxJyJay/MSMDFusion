@@ -6,6 +6,7 @@ MSMDFusion: A Gated Multi-Scale LiDAR-Camera Fusion Framework with Multi-Depth S
   - *Yang Jiao, Zequn Jie, Shaoxiang Chen, Jingjing Chen, Lin Ma, Yu-Gang Jiang*
 
 ## Framework
+![image](https://github.com/SxJyJay/MSMDFusion/blob/main/Framework_new.pdf)
 
 ## News
 - (2022.8.11) Our MSMDFusion ranks 2nd and 1st in the term of NDS and mAP on the nuScenes leaderboard among all methods that don't use TTA and Ensemble. 
