@@ -18,6 +18,7 @@ MSMDFusion: A Gated Multi-Scale LiDAR-Camera Fusion Framework with Multi-Depth S
 | MSMDFusion (val)  | LC | 69.1 | 71.8 |
 | MSMDFusion (test)  | LC | 70.8 | 73.2 |
 | MSMDFusion-base (test) | LC | 71.5 | 74.0 |
+| MSMDFusion-TTA (test) | LC | 73.3 | 75.1 |
 
 ## Performances on nuScenes tracking task
 |  model   | Modality | AMOTA | AMOTP | 
