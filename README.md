@@ -1,64 +1,74 @@
-# TransFusion repository
+# MSMDFusion
 
-PyTorch implementation of TransFusion for CVPR'2022 paper ["TransFusion: Robust LiDAR-Camera Fusion for 3D Object Detection with Transformers"](https://arxiv.org/abs/2203.11496), by Xuyang Bai, Zeyu Hu, Xinge Zhu, Qingqiu Huang, Yilun Chen, Hongbo Fu and Chiew-Lan Tai.
+Official implementation of TransFusion for CVPR'2023 paper ["MSMDFusion: Fusing LiDAR and Camera at Multiple Scales with Multi-Depth Seeds for 3D Object Detection"](https://arxiv.org/abs/2209.03102), by Yang Jiao, Zequn Jie, Shaoxiang Chen, Jingjing Chen, Lin Ma, and Yu-Gang Jiang.
+![MSMDFusion framework](https://github.com/SxJyJay/MSMDFusion/blob/main/MSMD-Framework.png)
 
-This paper focus on LiDAR-camera fusion for 3D object detection. If you find this project useful, please cite:
+
+## Introduction
+
+Fusing LiDAR and camera information is essential for achieving accurate and reliable 3D object detection in autonomous driving systems. This is challenging due to the difficulty of combining multi-granularity geometric and semantic features from two drastically different modalities. Recent approaches aim at exploring the semantic densities of camera features through lifting points in 2D camera images (referred to as seeds) into 3D space, and then incorporate 2D semantics via cross-modal interaction or fusion techniques. However, depth information is under-investigated in these approaches when lifting points into 3D space, thus 2D semantics can not be reliably fused with 3D points. Moreover, their multi-modal fusion strategy, which is implemented as concatenation or attention, either can not effectively fuse 2D and 3D information or is unable to perform fine-grained interactions in the voxel space. To this end, we propose a novel framework called MSMDFusion to tackle above problems.
+
+
+## Getting Started
+
+### Installation
+
+For basic installation, please refer to [getting_started.md](docs/getting_started.md) for installation.
+
+### Data Preparation
+
+**Step 1**: Please refer to the [official site](https://github.com/ADLab-AutoDrive/BEVFusion/blob/main/docs/getting_started.md) for prepare nuscenes data. After data preparation, you will be able to see the following directory structure:
+```
+mmdetection3d
+├── mmdet3d
+├── tools
+├── configs
+├── data
+│   ├── nuscenes
+│   │   ├── maps
+│   │   ├── samples
+│   │   ├── sweeps
+│   │   ├── v1.0-test
+|   |   ├── v1.0-trainval
+│   │   ├── nuscenes_database
+│   │   ├── nuscenes_infos_train.pkl
+│   │   ├── nuscenes_infos_val.pkl
+│   │   ├── nuscenes_infos_test.pkl
+│   │   ├── nuscenes_dbinfos_train.pkl
+
+```
+**Step 2**: Download preprocessed [virtual points samples](https://pan.baidu.com/s/1IxqcGxNCFnmSZw7Dlu3Xig?pwd=9xcb)(extraction code: 9xcb) and [sweeps](https://pan.baidu.com/s/1qUeopFHCWrr35af2MGBSnw?pwd=2eg1)(extraction code: 2eg1) data. And put them under the above folder ```samples``` and ```sweeps```, respectively.
+
+### Training and Evaluation
+
+For training, you need to first train a pure LiDAR backbone, such as TransFusion-L. Then, you can merge the checkpoints from pretrained TransFusion-L and ResNet-50 as suggested [here](https://github.com/XuyangBai/TransFusion/issues/7#issuecomment-1115499891). We also provide a merged 1-st stage checkpoint [here](https://pan.baidu.com/s/1Lj35HXc2Ajv0yWEH6H8g_A?pwd=69i7)(extraction code: 69i7)
+```
+# 1-st stage training
+sh ./tools/dist_train.sh ./configs/transfusion_nusc_voxel_L.py 8
+# 2-nd stage training
+sh ./tools/dist_train.sh ./configs/MSMDFusion_nusc_voxel_LC.py 8
+```
+
+For evaluation, you can use the following command:
+```
+# Evaluation
+sh ./tools/dist_test.sh ./configs/MSMDFusion_nusc_voxel_LC.py $ckpt_path$ 8 --eval bbox
+```
+
+For testing and making a submission to the leaderboard, please refer to the [official site](https://mmdetection3d.readthedocs.io/en/stable/datasets/nuscenes_det.html)
+
+## Citation
+If you find our paper useful, please cite:
 
 ```bash
-@article{bai2021pointdsc,
-  title={{TransFusion}: {R}obust {L}iDAR-{C}amera {F}usion for {3}D {O}bject {D}etection with {T}ransformers},
-  author={Xuyang Bai, Zeyu Hu, Xinge Zhu, Qingqiu Huang, Yilun Chen, Hongbo Fu and Chiew-Lan Tai},
-  journal={CVPR},
+@article{jiao2022msmdfusion,
+  title={MSMDFusion: Fusing LiDAR and Camera at Multiple Scales with Multi-Depth Seeds for 3D Object Detection},
+  author={Jiao, Yang and Jie, Zequn and Chen, Shaoxiang and Chen, Jingjing and Ma, Lin and Jiang, Yu-Gang},
+  journal={arXiv preprint arXiv:2209.03102},
   year={2022}
 }
 ```
 
-## Introduction
-
-LiDAR and camera are two important sensors for 3D object detection in autonomous driving. Despite the increasing popularity of sensor fusion in this field, the robustness against inferior image conditions, e.g., bad illumination and sensor misalignment, is under-explored. Existing fusion methods are easily affected by such conditions, mainly due to a hard association of LiDAR points and image pixels, established by calibration matrices.
-We propose TransFusion, a robust solution to LiDAR-camera fusion with a soft-association mechanism to handle inferior image conditions. Specifically, our TransFusion consists of convolutional backbones and a detection head based on a transformer decoder. The first layer of the decoder predicts initial bounding boxes from a LiDAR point cloud using a sparse set of object queries, and its second decoder layer adaptively fuses the object queries with useful image features, leveraging both spatial and contextual relationships. The attention mechanism of the transformer enables our model to adaptively determine where and what information should be taken from the image, leading to a robust and effective fusion strategy. We additionally design an image-guided query initialization strategy to deal with objects that are difficult to detect in point clouds. TransFusion achieves state-of-the-art performance on large-scale datasets. We provide extensive experiments to demonstrate its robustness against degenerated image quality and calibration errors. We also extend the proposed method to the 3D tracking task and achieve the 1st place in the leaderboard of nuScenes tracking, showing its effectiveness and generalization capability.
-
-![pipeline](resources/pipeline.png)
-
-**updates**
-- March 23, 2022: paper link added
-- March 15, 2022: initial release
-
-## Main Results
-
-Detailed results can be found in [nuscenes.md](configs/nuscenes.md) and [waymo.md](configs/waymo.md). Configuration files and guidance to reproduce these results are all included in [configs](configs), we are not going to release the pretrained models due to the policy of Huawei IAS BU. 
-
-### nuScenes detection test 
-
-| Model   | Backbone | mAP | NDS  | Link  |
-|---------|--------|--------|---------|---------|
-| [TransFusion-L](configs/transfusion_nusc_voxel_L.py) | VoxelNet | 65.52 | 70.23 | [Detection](https://drive.google.com/file/d/1Wk8p2LJEhwfKfhsKzlU9vDBOd0zn38dN/view?usp=sharing)
-| [TransFusion](configs/transfusion_nusc_voxel_LC.py) | VoxelNet | 68.90 | 71.68 | [Detection](https://drive.google.com/file/d/1X7_ig4v5A2vKsiHtUGtgeMN-0RJKsM6W/view?usp=sharing)
-
-### nuScenes tracking test
-
-| Model | Backbone | AMOTA |  AMOTP   | Link  |
-|---------|--------|--------|---------|---------|
-| [TransFusion-L](configs/transfusion_nusc_voxel_L.py) | VoxelNet | 0.686 | 0.529 | [Detection](https://drive.google.com/file/d/1Wk8p2LJEhwfKfhsKzlU9vDBOd0zn38dN/view?usp=sharing) / [Tracking](https://drive.google.com/file/d/1pKvRBUsM9h1Xgturd0Ae_bnGt0m_j3hk/view?usp=sharing)| 
-| [TransFusion](configs/transfusion_nusc_voxel_LC.py)| VoxelNet | 0.718 | 0.551 | [Detection](https://drive.google.com/file/d/1X7_ig4v5A2vKsiHtUGtgeMN-0RJKsM6W/view?usp=sharing) / [Tracking](https://drive.google.com/file/d/1EVuS-MAg_HSXUVqMrXEs4-RpZp0p5cfv/view?usp=sharing)| 
-
-### waymo detection validation
-
-| Model   | Backbone | Veh_L2 | Ped_L2 | Cyc_L2  | MAPH   |
-|---------|--------|---------|---------|---------|---------|
-| [TransFusion-L](configs/transfusion_waymo_voxel_L.py) | VoxelNet | 65.07 | 63.70 | 65.97 | 64.91
-| [TransFusion](configs/transfusion_waymo_voxel_LC.py) | VoxelNet | 65.11 | 64.02 | 67.40 | 65.51
-
-## Use TransFusion
-
-**Installation**
-
-Please refer to [getting_started.md](docs/getting_started.md) for installation of mmdet3d. We use mmdet 2.10.0 and mmcv 1.2.4 for this project.
-
-**Benchmark Evaluation and Training**
-
-Please refer to [data_preparation.md](docs/getting_started.md) to prepare the data. Then follow the instruction there to train our model. All detection configurations are included in [configs](configs/).
-
 ## Acknowlegement
 
-We sincerely thank the authors of [mmdetection3d](https://github.com/open-mmlab/mmdetection3d), [CenterPoint](https://github.com/tianweiy/CenterPoint), [GroupFree3D](https://github.com/zeliu98/Group-Free-3D) for open sourcing their methods.
+We sincerely thank the authors of [mmdetection3d](https://github.com/open-mmlab/mmdetection3d), [CenterPoint](https://github.com/tianweiy/CenterPoint), [TransFusion](https://github.com/XuyangBai/TransFusion), [MVP](https://github.com/tianweiy/MVP), [BEVFusion](https://github.com/ADLab-AutoDrive/BEVFusion) and [BEVFusion](https://github.com/mit-han-lab/bevfusion) for open sourcing their methods.
