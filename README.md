@@ -15,6 +15,8 @@ Fusing LiDAR and camera information is essential for achieving accurate and reli
 
 For basic installation, please refer to [getting_started.md](docs/getting_started.md) for installation.
 
+**Notice:** [spconv-2.x](https://github.com/traveller59/spconv) is required for its ```sparse_add``` op. 
+
 ### Data Preparation
 
 **Step 1**: Please refer to the [official site](https://github.com/ADLab-AutoDrive/BEVFusion/blob/main/docs/getting_started.md) for prepare nuscenes data. After data preparation, you will be able to see the following directory structure:
