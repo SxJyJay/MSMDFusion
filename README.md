@@ -37,7 +37,7 @@ mmdetection3d
 │   │   ├── nuscenes_dbinfos_train.pkl
 
 ```
-**Step 2**: Download preprocessed [virtual points samples](https://pan.baidu.com/s/1IxqcGxNCFnmSZw7Dlu3Xig?pwd=9xcb)(extraction code: 9xcb) and [sweeps](https://pan.baidu.com/s/1qUeopFHCWrr35af2MGBSnw?pwd=2eg1)(extraction code: 2eg1) data. And put them under the above folder ```samples``` and ```sweeps```, respectively.
+**Step 2**: Download preprocessed [virtual points samples](https://pan.baidu.com/s/1IxqcGxNCFnmSZw7Dlu3Xig?pwd=9xcb)(extraction code: 9xcb) and [sweeps](https://pan.baidu.com/s/1qUeopFHCWrr35af2MGBSnw?pwd=2eg1)(extraction code: 2eg1) data. And put them under the above folder ```samples``` and ```sweeps```, respectively, and rename them as ```FOREGROUND_MIXED_6NN_WITH_DEPTH```.
 
 ### Training and Evaluation
 
