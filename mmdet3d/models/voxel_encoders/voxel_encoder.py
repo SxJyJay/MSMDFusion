@@ -1,0 +1,1344 @@
+import torch
+from mmcv.cnn import build_norm_layer
+from mmcv.runner import force_fp32
+from torch import nn
+from torch.nn.utils.rnn import pad_sequence
+import torch.nn.functional as F
+
+from mmdet3d.ops import DynamicScatter, scatter_v2
+from .. import builder
+from ..registry import VOXEL_ENCODERS
+from .utils import VFELayer, get_paddings_indicator, DynamicVFELayerV2, Transformer_EncoderLayer, GatedUpdate
+import ipdb
+
+@VOXEL_ENCODERS.register_module()
+class HardSimpleVFE(nn.Module):
+    """Simple voxel feature encoder used in SECOND.
+
+    It simply averages the values of points in a voxel.
+
+    Args:
+        num_features (int): Number of features to use. Default: 4.
+    """
+
+    def __init__(self, num_features=4):
+        super(HardSimpleVFE, self).__init__()
+        self.num_features = num_features
+        self.fp16_enabled = False
+
+    @force_fp32(out_fp16=True)
+    def forward(self, features, num_points, coors):
+        """Forward function.
+
+        Args:
+            features (torch.Tensor): Point features in shape
+                (N, M, 3(4)). N is the number of voxels and M is the maximum
+                number of points inside a single voxel.
+            num_points (torch.Tensor): Number of points in each voxel,
+                 shape (N, ).
+            coors (torch.Tensor): Coordinates of voxels.
+
+        Returns:
+            torch.Tensor: Mean of points inside each voxel in shape (N, 3(4))
+        """
+        points_mean = features[:, :, :self.num_features].sum(
+            dim=1, keepdim=False) / num_points.type_as(features).view(-1, 1)
+        return points_mean.contiguous()
+
+
+@VOXEL_ENCODERS.register_module()
+class DynamicSimpleVFE(nn.Module):
+    """Simple dynamic voxel feature encoder used in DV-SECOND.
+
+    It simply averages the values of points in a voxel.
+    But the number of points in a voxel is dynamic and varies.
+
+    Args:
+        voxel_size (tupe[float]): Size of a single voxel
+        point_cloud_range (tuple[float]): Range of the point cloud and voxels
+    """
+
+    def __init__(self,
+                 voxel_size=(0.2, 0.2, 4),
+                 point_cloud_range=(0, -40, -3, 70.4, 40, 1)):
+        super(DynamicSimpleVFE, self).__init__()
+        self.scatter = DynamicScatter(voxel_size, point_cloud_range, True)
+        self.fp16_enabled = False
+
+    @torch.no_grad()
+    @force_fp32(out_fp16=True)
+    def forward(self, features, coors):
+        """Forward function.
+
+        Args:
+            features (torch.Tensor): Point features in shape
+                (N, 3(4)). N is the number of points.
+            coors (torch.Tensor): Coordinates of voxels.
+
+        Returns:
+            torch.Tensor: Mean of points inside each voxel in shape (M, 3(4)).
+                M is the number of voxels.
+        """
+        # This function is used from the start of the voxelnet
+        # num_points: [concated_num_points]
+        features, features_coors = self.scatter(features, coors)
+        return features, features_coors
+
+
+@VOXEL_ENCODERS.register_module()
+class DynamicVFE(nn.Module):
+    """Dynamic Voxel feature encoder used in DV-SECOND.
+
+    It encodes features of voxels and their points. It could also fuse
+    image feature into voxel features in a point-wise manner.
+    The number of points inside the voxel varies.
+
+    Args:
+        in_channels (int): Input channels of VFE. Defaults to 4.
+        feat_channels (list(int)): Channels of features in VFE.
+        with_distance (bool): Whether to use the L2 distance of points to the
+            origin point. Default False.
+        with_cluster_center (bool): Whether to use the distance to cluster
+            center of points inside a voxel. Default to False.
+        with_voxel_center (bool): Whether to use the distance to center of
+            voxel for each points inside a voxel. Default to False.
+        voxel_size (tuple[float]): Size of a single voxel. Default to
+            (0.2, 0.2, 4).
+        point_cloud_range (tuple[float]): The range of points or voxels.
+            Default to (0, -40, -3, 70.4, 40, 1).
+        norm_cfg (dict): Config dict of normalization layers.
+        mode (str): The mode when pooling features of points inside a voxel.
+            Available options include 'max' and 'avg'. Default to 'max'.
+        fusion_layer (dict | None): The config dict of fusion layer used in
+            multi-modal detectors. Default to None.
+        return_point_feats (bool): Whether to return the features of each
+            points. Default to False.
+    """
+
+    def __init__(self,
+                 in_channels=4,
+                 feat_channels=[],
+                 with_distance=False,
+                 with_cluster_center=False,
+                 with_voxel_center=False,
+                 voxel_size=(0.2, 0.2, 4),
+                 point_cloud_range=(0, -40, -3, 70.4, 40, 1),
+                 norm_cfg=dict(type='BN1d', eps=1e-3, momentum=0.01),
+                 mode='max',
+                 fusion_layer=None,
+                 return_point_feats=False):
+        super(DynamicVFE, self).__init__()
+        assert mode in ['avg', 'max']
+        assert len(feat_channels) > 0
+        if with_cluster_center:
+            in_channels += 3
+        if with_voxel_center:
+            in_channels += 3
+        if with_distance:
+            in_channels += 3
+        self.in_channels = in_channels
+        self._with_distance = with_distance
+        self._with_cluster_center = with_cluster_center
+        self._with_voxel_center = with_voxel_center
+        self.return_point_feats = return_point_feats
+        self.fp16_enabled = False
+
+        # Need pillar (voxel) size and x/y offset in order to calculate offset
+        self.vx = voxel_size[0]
+        self.vy = voxel_size[1]
+        self.vz = voxel_size[2]
+        self.x_offset = self.vx / 2 + point_cloud_range[0]
+        self.y_offset = self.vy / 2 + point_cloud_range[1]
+        self.z_offset = self.vz / 2 + point_cloud_range[2]
+        self.point_cloud_range = point_cloud_range
+        self.scatter = DynamicScatter(voxel_size, point_cloud_range, True)
+
+        feat_channels = [self.in_channels] + list(feat_channels)
+        vfe_layers = []
+        for i in range(len(feat_channels) - 1):
+            in_filters = feat_channels[i]
+            out_filters = feat_channels[i + 1]
+            if i > 0:
+                in_filters *= 2
+            norm_name, norm_layer = build_norm_layer(norm_cfg, out_filters)
+            vfe_layers.append(
+                nn.Sequential(
+                    nn.Linear(in_filters, out_filters, bias=False), norm_layer,
+                    nn.ReLU(inplace=True)))
+        self.vfe_layers = nn.ModuleList(vfe_layers)
+        self.num_vfe = len(vfe_layers)
+        self.vfe_scatter = DynamicScatter(voxel_size, point_cloud_range,
+                                          (mode != 'max'))
+        self.cluster_scatter = DynamicScatter(
+            voxel_size, point_cloud_range, average_points=True)
+        self.fusion_layer = None
+        if fusion_layer is not None:
+            self.fusion_layer = builder.build_fusion_layer(fusion_layer)
+
+    def map_voxel_center_to_point(self, pts_coors, voxel_mean, voxel_coors):
+        """Map voxel features to its corresponding points.
+
+        Args:
+            pts_coors (torch.Tensor): Voxel coordinate of each point.
+            voxel_mean (torch.Tensor): Voxel features to be mapped.
+            voxel_coors (torch.Tensor): Coordinates of valid voxels
+
+        Returns:
+            torch.Tensor: Features or centers of each point.
+        """
+        # Step 1: scatter voxel into canvas
+        # Calculate necessary things for canvas creation
+        canvas_z = int(
+            (self.point_cloud_range[5] - self.point_cloud_range[2]) / self.vz)
+        canvas_y = int(
+            (self.point_cloud_range[4] - self.point_cloud_range[1]) / self.vy)
+        canvas_x = int(
+            (self.point_cloud_range[3] - self.point_cloud_range[0]) / self.vx)
+        # canvas_channel = voxel_mean.size(1)
+        batch_size = pts_coors[-1, 0] + 1
+        canvas_len = canvas_z * canvas_y * canvas_x * batch_size
+        # Create the canvas for this sample
+        canvas = voxel_mean.new_zeros(canvas_len, dtype=torch.long)
+        # Only include non-empty pillars
+        indices = (
+            voxel_coors[:, 0] * canvas_z * canvas_y * canvas_x +
+            voxel_coors[:, 1] * canvas_y * canvas_x +
+            voxel_coors[:, 2] * canvas_x + voxel_coors[:, 3])
+        # Scatter the blob back to the canvas
+        canvas[indices.long()] = torch.arange(
+            start=0, end=voxel_mean.size(0), device=voxel_mean.device)
+
+        # Step 2: get voxel mean for each point
+        voxel_index = (
+            pts_coors[:, 0] * canvas_z * canvas_y * canvas_x +
+            pts_coors[:, 1] * canvas_y * canvas_x +
+            pts_coors[:, 2] * canvas_x + pts_coors[:, 3])
+        voxel_inds = canvas[voxel_index.long()]
+        center_per_point = voxel_mean[voxel_inds, ...]
+        return center_per_point
+
+    @force_fp32(out_fp16=True)
+    def forward(self,
+                features,
+                coors,
+                points=None,
+                img_feats=None,
+                img_metas=None):
+        """Forward functions.
+
+        Args:
+            features (torch.Tensor): Features of voxels, shape is NxC.
+            coors (torch.Tensor): Coordinates of voxels, shape is  Nx(1+NDim).
+            points (list[torch.Tensor], optional): Raw points used to guide the
+                multi-modality fusion. Defaults to None.
+            img_feats (list[torch.Tensor], optional): Image fetures used for
+                multi-modality fusion. Defaults to None.
+            img_metas (dict, optional): [description]. Defaults to None.
+
+        Returns:
+            tuple: If `return_point_feats` is False, returns voxel features and
+                its coordinates. If `return_point_feats` is True, returns
+                feature of each points inside voxels.
+        """
+        features_ls = [features]
+        # Find distance of x, y, and z from cluster center
+        if self._with_cluster_center:
+            voxel_mean, mean_coors = self.cluster_scatter(features, coors)
+            points_mean = self.map_voxel_center_to_point(
+                coors, voxel_mean, mean_coors)
+            # TODO: maybe also do cluster for reflectivity
+            f_cluster = features[:, :3] - points_mean[:, :3]
+            features_ls.append(f_cluster)
+
+        # Find distance of x, y, and z from pillar center
+        if self._with_voxel_center:
+            f_center = features.new_zeros(size=(features.size(0), 3))
+            f_center[:, 0] = features[:, 0] - (
+                coors[:, 3].type_as(features) * self.vx + self.x_offset)
+            f_center[:, 1] = features[:, 1] - (
+                coors[:, 2].type_as(features) * self.vy + self.y_offset)
+            f_center[:, 2] = features[:, 2] - (
+                coors[:, 1].type_as(features) * self.vz + self.z_offset)
+            features_ls.append(f_center)
+
+        if self._with_distance:
+            points_dist = torch.norm(features[:, :3], 2, 1, keepdim=True)
+            features_ls.append(points_dist)
+
+        # Combine together feature decorations
+        features = torch.cat(features_ls, dim=-1)
+        for i, vfe in enumerate(self.vfe_layers):
+            point_feats = vfe(features)
+            if (i == len(self.vfe_layers) - 1 and self.fusion_layer is not None
+                    and img_feats is not None):
+                point_feats = self.fusion_layer(img_feats, points, point_feats,
+                                                img_metas)
+            voxel_feats, voxel_coors = self.vfe_scatter(point_feats, coors)
+            if i != len(self.vfe_layers) - 1:
+                # need to concat voxel feats if it is not the last vfe
+                feat_per_point = self.map_voxel_center_to_point(
+                    coors, voxel_feats, voxel_coors)
+                features = torch.cat([point_feats, feat_per_point], dim=1)
+
+        if self.return_point_feats:
+            return point_feats
+        return voxel_feats, voxel_coors
+
+
+@VOXEL_ENCODERS.register_module()
+class HardVFE(nn.Module):
+    """Voxel feature encoder used in DV-SECOND.
+
+    It encodes features of voxels and their points. It could also fuse
+    image feature into voxel features in a point-wise manner.
+
+    Args:
+        in_channels (int): Input channels of VFE. Defaults to 4.
+        feat_channels (list(int)): Channels of features in VFE.
+        with_distance (bool): Whether to use the L2 distance of points to the
+            origin point. Default False.
+        with_cluster_center (bool): Whether to use the distance to cluster
+            center of points inside a voxel. Default to False.
+        with_voxel_center (bool): Whether to use the distance to center of
+            voxel for each points inside a voxel. Default to False.
+        voxel_size (tuple[float]): Size of a single voxel. Default to
+            (0.2, 0.2, 4).
+        point_cloud_range (tuple[float]): The range of points or voxels.
+            Default to (0, -40, -3, 70.4, 40, 1).
+        norm_cfg (dict): Config dict of normalization layers.
+        mode (str): The mode when pooling features of points inside a voxel.
+            Available options include 'max' and 'avg'. Default to 'max'.
+        fusion_layer (dict | None): The config dict of fusion layer used in
+            multi-modal detectors. Default to None.
+        return_point_feats (bool): Whether to return the features of each
+            points. Default to False.
+    """
+
+    def __init__(self,
+                 in_channels=4,
+                 feat_channels=[],
+                 with_distance=False,
+                 with_cluster_center=False,
+                 with_voxel_center=False,
+                 voxel_size=(0.2, 0.2, 4),
+                 point_cloud_range=(0, -40, -3, 70.4, 40, 1),
+                 norm_cfg=dict(type='BN1d', eps=1e-3, momentum=0.01),
+                 mode='max',
+                 fusion_layer=None,
+                 return_point_feats=False):
+        super(HardVFE, self).__init__()
+        assert len(feat_channels) > 0
+        if with_cluster_center:
+            in_channels += 3
+        if with_voxel_center:
+            in_channels += 3
+        if with_distance:
+            in_channels += 3
+        self.in_channels = in_channels
+        self._with_distance = with_distance
+        self._with_cluster_center = with_cluster_center
+        self._with_voxel_center = with_voxel_center
+        self.return_point_feats = return_point_feats
+        self.fp16_enabled = False
+
+        # Need pillar (voxel) size and x/y offset to calculate pillar offset
+        self.vx = voxel_size[0]
+        self.vy = voxel_size[1]
+        self.vz = voxel_size[2]
+        self.x_offset = self.vx / 2 + point_cloud_range[0]
+        self.y_offset = self.vy / 2 + point_cloud_range[1]
+        self.z_offset = self.vz / 2 + point_cloud_range[2]
+        self.point_cloud_range = point_cloud_range
+        self.scatter = DynamicScatter(voxel_size, point_cloud_range, True)
+
+        feat_channels = [self.in_channels] + list(feat_channels)
+        vfe_layers = []
+        for i in range(len(feat_channels) - 1):
+            in_filters = feat_channels[i]
+            out_filters = feat_channels[i + 1]
+            if i > 0:
+                in_filters *= 2
+            # TODO: pass norm_cfg to VFE
+            # norm_name, norm_layer = build_norm_layer(norm_cfg, out_filters)
+            if i == (len(feat_channels) - 2):
+                cat_max = False
+                max_out = True
+                if fusion_layer:
+                    max_out = False
+            else:
+                max_out = True
+                cat_max = True
+            vfe_layers.append(
+                VFELayer(
+                    in_filters,
+                    out_filters,
+                    norm_cfg=norm_cfg,
+                    max_out=max_out,
+                    cat_max=cat_max))
+            self.vfe_layers = nn.ModuleList(vfe_layers)
+        self.num_vfe = len(vfe_layers)
+
+        self.fusion_layer = None
+        if fusion_layer is not None:
+            self.fusion_layer = builder.build_fusion_layer(fusion_layer)
+
+    @force_fp32(out_fp16=True)
+    def forward(self,
+                features,
+                num_points,
+                coors,
+                img_feats=None,
+                img_metas=None):
+        """Forward functions.
+
+        Args:
+            features (torch.Tensor): Features of voxels, shape is MxNxC.
+            num_points (torch.Tensor): Number of points in each voxel.
+            coors (torch.Tensor): Coordinates of voxels, shape is Mx(1+NDim).
+            img_feats (list[torch.Tensor], optional): Image fetures used for
+                multi-modality fusion. Defaults to None.
+            img_metas (dict, optional): [description]. Defaults to None.
+
+        Returns:
+            tuple: If `return_point_feats` is False, returns voxel features and
+                its coordinates. If `return_point_feats` is True, returns
+                feature of each points inside voxels.
+        """
+        features_ls = [features]
+        # Find distance of x, y, and z from cluster center
+        if self._with_cluster_center:
+            points_mean = (
+                features[:, :, :3].sum(dim=1, keepdim=True) /
+                num_points.type_as(features).view(-1, 1, 1))
+            # TODO: maybe also do cluster for reflectivity
+            f_cluster = features[:, :, :3] - points_mean
+            features_ls.append(f_cluster)
+
+        # Find distance of x, y, and z from pillar center
+        if self._with_voxel_center:
+            f_center = features.new_zeros(
+                size=(features.size(0), features.size(1), 3))
+            f_center[:, :, 0] = features[:, :, 0] - (
+                coors[:, 3].type_as(features).unsqueeze(1) * self.vx +
+                self.x_offset)
+            f_center[:, :, 1] = features[:, :, 1] - (
+                coors[:, 2].type_as(features).unsqueeze(1) * self.vy +
+                self.y_offset)
+            f_center[:, :, 2] = features[:, :, 2] - (
+                coors[:, 1].type_as(features).unsqueeze(1) * self.vz +
+                self.z_offset)
+            features_ls.append(f_center)
+
+        if self._with_distance:
+            points_dist = torch.norm(features[:, :, :3], 2, 2, keepdim=True)
+            features_ls.append(points_dist)
+
+        # Combine together feature decorations
+        voxel_feats = torch.cat(features_ls, dim=-1)
+        # The feature decorations were calculated without regard to whether
+        # pillar was empty.
+        # Need to ensure that empty voxels remain set to zeros.
+        voxel_count = voxel_feats.shape[1]
+        mask = get_paddings_indicator(num_points, voxel_count, axis=0)
+        voxel_feats *= mask.unsqueeze(-1).type_as(voxel_feats)
+
+        for i, vfe in enumerate(self.vfe_layers):
+            voxel_feats = vfe(voxel_feats)
+
+        if (self.fusion_layer is not None and img_feats is not None):
+            voxel_feats = self.fusion_with_mask(features, mask, voxel_feats,
+                                                coors, img_feats, img_metas)
+
+        return voxel_feats
+
+    def fusion_with_mask(self, features, mask, voxel_feats, coors, img_feats,
+                         img_metas):
+        """Fuse image and point features with mask.
+
+        Args:
+            features (torch.Tensor): Features of voxel, usually it is the
+                values of points in voxels.
+            mask (torch.Tensor): Mask indicates valid features in each voxel.
+            voxel_feats (torch.Tensor): Features of voxels.
+            coors (torch.Tensor): Coordinates of each single voxel.
+            img_feats (list[torch.Tensor]): Multi-scale feature maps of image.
+            img_metas (list(dict)): Meta information of image and points.
+
+        Returns:
+            torch.Tensor: Fused features of each voxel.
+        """
+        # the features is consist of a batch of points
+        batch_size = coors[-1, 0] + 1
+        points = []
+        for i in range(batch_size):
+            single_mask = (coors[:, 0] == i)
+            points.append(features[single_mask][mask[single_mask]])
+
+        point_feats = voxel_feats[mask]
+        point_feats = self.fusion_layer(img_feats, points, point_feats,
+                                        img_metas)
+
+        voxel_canvas = voxel_feats.new_zeros(
+            size=(voxel_feats.size(0), voxel_feats.size(1),
+                  point_feats.size(-1)))
+        voxel_canvas[mask] = point_feats
+        out = torch.max(voxel_canvas, dim=1)[0]
+
+        return out
+
+from mmdet3d.ops import build_mlp
+
+@VOXEL_ENCODERS.register_module()
+class IPFLayer(nn.Module):
+
+    def __init__(self,
+                 in_channels=4,
+                 feat_channels=[],
+                 with_distance=False,
+                 with_cluster_center=False,
+                 with_rel_mlp=True,
+                 rel_mlp_hidden_dims=[16,],
+                 rel_mlp_in_channel=3,
+                 with_voxel_center=False,
+                 norm_cfg=dict(type='BN1d', eps=1e-3, momentum=0.01),
+                 mode='max',
+                 return_point_feats=False,
+                 return_inv=True,
+                 rel_dist_scaler=1.0,
+                 with_shortcut=True,
+                 xyz_normalizer=[1.0, 1.0, 1.0],
+                 act='relu',
+                 dropout=0.0,
+                 ):
+        super(IPFLayer, self).__init__()
+        # basic init
+        assert len(feat_channels) > 0
+        if with_cluster_center:
+            in_channels += 3
+        if with_voxel_center:
+            in_channels += 3
+        if with_distance:
+            in_channels += 3
+        self.in_channels = in_channels
+        self._with_distance = with_distance
+        self._with_cluster_center = with_cluster_center
+        self._with_voxel_center = with_voxel_center
+        self.return_point_feats = return_point_feats
+        self.fp16_enabled = False
+        # overwrite
+        self.scatter = None
+        self.vfe_scatter = None
+        self.cluster_scatter = None
+        self.rel_dist_scaler = rel_dist_scaler
+        self.mode = mode
+        self.with_shortcut = with_shortcut
+        self._with_rel_mlp = with_rel_mlp
+        self.xyz_normalizer = xyz_normalizer
+        if with_rel_mlp:
+            rel_mlp_hidden_dims.append(in_channels) # not self.in_channels
+            self.rel_mlp = build_mlp(rel_mlp_in_channel, rel_mlp_hidden_dims, norm_cfg, act=act)
+        if with_shortcut:
+            self.shortcut_align = build_mlp(feat_channels[-1], [in_channels], norm_cfg, act=act)
+        if act != 'relu' or dropout > 0: # do not double in_filter
+            feat_channels = [self.in_channels] + list(feat_channels)
+            vfe_layers = []
+            for i in range(len(feat_channels) - 1):
+                in_filters = feat_channels[i]
+                out_filters = feat_channels[i + 1]
+                if i > 0:
+                    in_filters *= 2
+
+                vfe_layers.append(
+                    DynamicVFELayerV2(
+                        in_filters,
+                        out_filters,
+                        norm_cfg,
+                        act=act,
+                        dropout=dropout,
+                    )
+                )
+            self.vfe_layers = nn.ModuleList(vfe_layers)
+            self.num_vfe = len(vfe_layers)
+        
+
+    def map_voxel_center_to_point(self, voxel_mean, voxel2point_inds):
+
+        return voxel_mean[voxel2point_inds]
+
+    # if out_fp16=True, the large numbers of points 
+    # lead to overflow error in following layers
+    @force_fp32(out_fp16=False)
+    def forward(self,
+                pts_ins_feat,
+                pts_ins_ids,
+                pseudo_centroids,
+                pseudo_centroids_ins_ids,
+                f_cluster=None,
+                points=None,
+                img_feats=None,
+                img_metas=None,
+                return_inv=False,
+                return_both=True,
+                unq_inv_once=None,
+                new_coors_once=None,
+        ):
+        
+        xyz_normalizer = torch.tensor(self.xyz_normalizer, device=pts_ins_feat.device, dtype=pts_ins_feat.dtype)
+        features_ls = [torch.cat([pts_ins_feat[:, :3] / xyz_normalizer[None, :], pts_ins_feat[:, 3:]], dim=1)]
+        # origin_point_coors = features[:, :3]
+        if self.with_shortcut:
+            shortcut = torch.cat([pts_ins_feat[:, :3] / xyz_normalizer[None, :], pts_ins_feat[:, 3:]], dim=1)
+        
+        # # make groups of pseudo centroids as f_cluster
+        _, mean_coors, unq_inv = scatter_v2(pts_ins_feat[:, :3], pts_ins_ids, mode='avg')
+
+        assert mean_coors.equal(pseudo_centroids_ins_ids)
+        
+        pts_ins_pseudo_centroids = self.map_voxel_center_to_point(pseudo_centroids, unq_inv) # shape: (N, Pseudo_C, 3)
+        f_cluster = (pts_ins_feat[:, None, :3] - pts_ins_pseudo_centroids) / self.rel_dist_scaler
+        
+        f_cluster = f_cluster.view(f_cluster.shape[0], -1) # shape: (N, Pseudo_C*3)
+        # if f_cluster is None:
+        #     # # Find distance of x, y, and z from cluster center
+        #     # voxel_mean, mean_coors, unq_inv = scatter_v2(features[:, :3], coors, mode='avg', unq_inv=unq_inv_once, new_coors=new_coors_once)
+        #     # points_mean = self.map_voxel_center_to_point(
+        #     #     voxel_mean, unq_inv)
+        #     # # TODO: maybe also do cluster for reflectivity
+        #     # f_cluster = (features[:, :3] - points_mean[:, :3]) / self.rel_dist_scaler
+
+        #     # # make groups of pseudo centroids as f_cluster
+        #     pass 
+        # else:
+        #     f_cluster = f_cluster / self.rel_dist_scaler
+
+        if self._with_cluster_center:
+            features_ls.append(f_cluster / 10.0)
+
+        if self._with_rel_mlp:
+            features_ls[0] = features_ls[0] * self.rel_mlp(f_cluster)
+
+        if self._with_distance:
+            points_dist = torch.norm(pts_ins_feat[:, :3], 2, 1, keepdim=True)
+            features_ls.append(points_dist)
+
+        # Combine together feature decorations
+        features = torch.cat(features_ls, dim=-1)
+
+        voxel_feats_list = []
+        for i, vfe in enumerate(self.vfe_layers):
+            point_feats = vfe(features)
+
+            voxel_feats, voxel_coors, unq_inv = scatter_v2(point_feats, pts_ins_ids, mode=self.mode)
+            voxel_feats_list.append(voxel_feats)
+            if i != len(self.vfe_layers) - 1:
+                # need to concat voxel feats if it is not the last vfe
+                feat_per_point = self.map_voxel_center_to_point(voxel_feats, unq_inv)
+                features = torch.cat([point_feats, feat_per_point], dim=1)
+
+        voxel_feats = torch.cat(voxel_feats_list, dim=1)
+        
+        if return_both:
+            if self.with_shortcut:
+                point_feats = self.shortcut_align(point_feats) + shortcut
+            return point_feats, voxel_feats, unq_inv
+
+        else:
+            return voxel_feats, unq_inv
+
+@VOXEL_ENCODERS.register_module()
+class IPFLayerV2(nn.Module):
+
+    def __init__(self,
+                 in_channels=4,
+                 feat_channels=[],
+                 with_distance=False,
+                 with_cluster_center=False,
+                 with_rel_mlp=True,
+                 rel_mlp_hidden_dims=[16,],
+                 rel_mlp_in_channel=3,
+                 cross_layer_update=False,
+                 with_voxel_center=False,
+                 norm_cfg=dict(type='BN1d', eps=1e-3, momentum=0.01),
+                 mode='max',
+                 return_point_feats=False,
+                 return_inv=True,
+                 rel_dist_scaler=1.0,
+                 with_shortcut=True,
+                 xyz_normalizer=[1.0, 1.0, 1.0],
+                 act='relu',
+                 dropout=0.0,
+                 ):
+        super(IPFLayerV2, self).__init__()
+        # basic init
+        assert len(feat_channels) > 0
+        if with_cluster_center:
+            in_channels += 3
+        if with_voxel_center:
+            in_channels += 3
+        if with_distance:
+            in_channels += 3
+        self.in_channels = in_channels
+        self._with_distance = with_distance
+        self._with_cluster_center = with_cluster_center
+        self._with_voxel_center = with_voxel_center
+        self._cross_layer_update = cross_layer_update
+        self.return_point_feats = return_point_feats
+        self.fp16_enabled = False
+        # overwrite
+        self.scatter = None
+        self.vfe_scatter = None
+        self.cluster_scatter = None
+        self.rel_dist_scaler = rel_dist_scaler
+        self.mode = mode
+        self.with_shortcut = with_shortcut
+        self._with_rel_mlp = with_rel_mlp
+        self.xyz_normalizer = xyz_normalizer
+        if with_rel_mlp:
+            rel_mlp_hidden_dims.append(in_channels) # not self.in_channels
+            self.rel_mlp = build_mlp(rel_mlp_in_channel, rel_mlp_hidden_dims, norm_cfg, act=act)
+
+        if act != 'relu' or dropout > 0: # do not double in_filter
+            feat_channels = [self.in_channels] + list(feat_channels)
+            vfe_layers = []
+            for i in range(len(feat_channels) - 1):
+                in_filters = feat_channels[i]
+                out_filters = feat_channels[i + 1]
+                if i > 0:
+                    in_filters *= 2
+
+                vfe_layers.append(
+                    DynamicVFELayerV2(
+                        in_filters,
+                        out_filters,
+                        norm_cfg,
+                        act=act,
+                        dropout=dropout,
+                    )
+                )
+            self.vfe_layers = nn.ModuleList(vfe_layers)
+            self.num_vfe = len(vfe_layers)
+        
+        if cross_layer_update:
+            self.gated_update = GatedUpdate(out_filters*2, out_filters, norm_cfg=norm_cfg)
+        
+
+    def map_voxel_center_to_point(self, voxel_mean, voxel2point_inds):
+
+        return voxel_mean[voxel2point_inds]
+
+    # if out_fp16=True, the large numbers of points 
+    # lead to overflow error in following layers
+    @force_fp32(out_fp16=False)
+    def forward(self,
+                pts_ins_feat,
+                pts_ins_ids,
+                pseudo_centroids, # (num_ins, num_pseudo_centroids, 3)
+                pseudo_centroids_ins_ids, # (num_ins,)
+                pseudo_centroids_fps_pts_ids, # (num_ins, num_pseudo_centroids, fps_num)
+                last_pseudo_centroids_feat=None,
+                f_cluster=None,
+                points=None,
+                img_feats=None,
+                img_metas=None,
+                return_inv=False,
+                return_both=False,
+                unq_inv_once=None,
+                new_coors_once=None,
+        ):
+
+        # fetch pseudo_centroids_fps_pts
+        num_ins, num_pseudo_centroids, fps_num = pseudo_centroids_fps_pts_ids.shape
+
+        pseudo_centroids_fps_pts_ids = pseudo_centroids_fps_pts_ids.view(-1) # (num_ins * num_pseudo_centroids * fps_num)
+        pseudo_centroids_fps_pts = pts_ins_feat[pseudo_centroids_fps_pts_ids] # (num_ins * num_pseudo_centroids * fps_num, C)
+        pseudo_centroids_fps_expand = pseudo_centroids.unsqueeze(2).repeat(1, 1, fps_num, 1).view(-1, 3)
+        f_cluster = (pseudo_centroids_fps_pts[:, :3] - pseudo_centroids_fps_expand) / self.rel_dist_scaler 
+
+        xyz_normalizer = torch.tensor(self.xyz_normalizer, device=pts_ins_feat.device, dtype=pts_ins_feat.dtype)
+        features_ls = [torch.cat([pseudo_centroids_fps_pts[:, :3] / xyz_normalizer[None, :], pseudo_centroids_fps_pts[:, 3:]], dim=1)]
+        # origin_point_coors = features[:, :3]
+        if self.with_shortcut:
+            shortcut = pseudo_centroids_fps_pts[:, 3:]
+
+        # # distinguish different fps groups
+        # pseudo_centroids_fps_ins_ids = pseudo_centroids_ins_ids.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, fps_num)
+        # fps_ids_adder = (torch.arange(num_pseudo_centroids) * 1e5).to(pts_ins_feat.device).reshape(1, num_pseudo_centroids, 1)
+        # pseudo_centroids_fps_ins_ids = pseudo_centroids_fps_ins_ids + fps_ids_adder # (num_ins * num_pseudo_centroids * fps_num)
+        # pseudo_centroids_fps_ins_ids = pseudo_centroids_fps_ins_ids.view(-1)
+
+        
+        
+        # # # make groups of pseudo centroids as f_cluster
+        
+        # pseudo_fps_centroids, mean_coors, unq_inv = scatter_v2(pseudo_centroids_fps_pts[:, :3], pseudo_centroids_fps_ins_ids, mode='avg', sorted=False)
+        # # pseudo_centroids should be same as mean coors
+        # pts_ins_pseudo_centroids = self.map_voxel_center_to_point(pseudo_centroids, unq_inv) # shape: (N, Pseudo_C, 3)
+        # f_cluster = (pts_ins_feat[:, None, :3] - pts_ins_pseudo_centroids) / self.rel_dist_scaler
+        # f_cluster = f_cluster.view(f_cluster.shape[0], -1)
+        
+
+        if self._with_cluster_center:
+            features_ls.append(f_cluster / 10.0)
+
+        if self._with_rel_mlp:
+            features_ls[0] = features_ls[0] * self.rel_mlp(f_cluster)
+
+        if self._with_distance:
+            points_dist = torch.norm(pts_ins_feat[:, :3], 2, 1, keepdim=True)
+            features_ls.append(points_dist)
+
+        # Combine together feature decorations
+        features = torch.cat(features_ls, dim=-1)
+
+        voxel_feats_list = []         
+        for i, vfe in enumerate(self.vfe_layers):
+            point_feats = vfe(features)
+            fps_point_feats = point_feats.view(num_ins, num_pseudo_centroids, fps_num, -1)
+            pseudo_centroids_feats = fps_point_feats.max(2)[0]
+            voxel_feats_list.append(pseudo_centroids_feats)
+            if i != len(self.vfe_layers) - 1:
+                # need to concat voxel feats if it is not the last vfe
+                pseudo_centroids_feats_expanded = pseudo_centroids_feats.unsqueeze(2).expand_as(fps_point_feats)
+                features = torch.cat([point_feats, pseudo_centroids_feats_expanded.contiguous().view(num_ins*num_pseudo_centroids*fps_num, -1)], dim=1)
+
+        voxel_feats = torch.cat(voxel_feats_list, dim=-1)
+        # update pseudo_centroids feat using feat from last step / scale
+        if self._cross_layer_update:
+            # ipdb.set_trace()
+            voxel_feats = self.gated_update(voxel_feats, last_pseudo_centroids_feat)
+
+        if return_both:
+            if self.with_shortcut:
+                point_feats = point_feats + shortcut
+            return point_feats, voxel_feats
+        else:
+            return voxel_feats
+
+# ## We postulate that the number of fps points is limited and do harm to generated pseudo centroids feature. Hence we test another version
+# ## that generates pseudo centroids features using all ins points
+# @VOXEL_ENCODERS.register_module()
+# class IPFLayerV2(nn.Module):
+
+#     def __init__(self,
+#                  in_channels=4,
+#                  feat_channels=[],
+#                  with_distance=False,
+#                  with_cluster_center=False,
+#                  with_rel_mlp=True,
+#                  rel_mlp_hidden_dims=[16,],
+#                  rel_mlp_in_channel=3,
+#                  cross_layer_update=False,
+#                  with_voxel_center=False,
+#                  norm_cfg=dict(type='BN1d', eps=1e-3, momentum=0.01),
+#                  mode='max',
+#                  return_point_feats=False,
+#                  return_inv=True,
+#                  rel_dist_scaler=1.0,
+#                  with_shortcut=True,
+#                  xyz_normalizer=[1.0, 1.0, 1.0],
+#                  act='relu',
+#                  dropout=0.0,
+#                  ):
+#         super(IPFLayerV2, self).__init__()
+#         # basic init
+#         assert len(feat_channels) > 0
+#         if with_cluster_center:
+#             in_channels += 3
+#         if with_voxel_center:
+#             in_channels += 3
+#         if with_distance:
+#             in_channels += 3
+#         self.in_channels = in_channels
+#         self._with_distance = with_distance
+#         self._with_cluster_center = with_cluster_center
+#         self._with_voxel_center = with_voxel_center
+#         self._cross_layer_update = cross_layer_update
+#         self.return_point_feats = return_point_feats
+#         self.fp16_enabled = False
+#         # overwrite
+#         self.scatter = None
+#         self.vfe_scatter = None
+#         self.cluster_scatter = None
+#         self.rel_dist_scaler = rel_dist_scaler
+#         self.mode = mode
+#         self.with_shortcut = with_shortcut
+#         self._with_rel_mlp = with_rel_mlp
+#         self.xyz_normalizer = xyz_normalizer
+#         if with_rel_mlp:
+#             rel_mlp_hidden_dims.append(in_channels) # not self.in_channels
+#             self.rel_mlp = build_mlp(rel_mlp_in_channel, rel_mlp_hidden_dims, norm_cfg, act=act)
+
+#         if act != 'relu' or dropout > 0: # do not double in_filter
+#             feat_channels = [self.in_channels] + list(feat_channels)
+#             vfe_layers = []
+#             for i in range(len(feat_channels) - 1):
+#                 in_filters = feat_channels[i]
+#                 out_filters = feat_channels[i + 1]
+#                 if i > 0:
+#                     in_filters *= 2
+
+#                 vfe_layers.append(
+#                     DynamicVFELayerV2(
+#                         in_filters,
+#                         out_filters,
+#                         norm_cfg,
+#                         act=act,
+#                         dropout=dropout,
+#                     )
+#                 )
+#             self.vfe_layers = nn.ModuleList(vfe_layers)
+#             self.num_vfe = len(vfe_layers)
+        
+#         if cross_layer_update:
+#             self.gated_update = GatedUpdate(out_filters*2, out_filters, norm_cfg=norm_cfg)
+        
+
+#     def map_voxel_center_to_point(self, voxel_mean, voxel2point_inds):
+
+#         return voxel_mean[voxel2point_inds]
+
+#     # if out_fp16=True, the large numbers of points 
+#     # lead to overflow error in following layers
+#     @force_fp32(out_fp16=False)
+#     def forward(self,
+#                 pts_ins_feat,
+#                 pts_ins_ids,
+#                 pseudo_centroids, # (num_ins, num_pseudo_centroids, 3)
+#                 pseudo_centroids_ins_ids, # (num_ins,)
+#                 pseudo_centroids_fps_pts_ids, # (num_ins, num_pseudo_centroids, fps_num)
+#                 last_pseudo_centroids_feat=None,
+#                 f_cluster=None,
+#                 points=None,
+#                 img_feats=None,
+#                 img_metas=None,
+#                 return_inv=False,
+#                 return_both=False,
+#                 unq_inv_once=None,
+#                 new_coors_once=None,
+#         ):
+
+#         # fetch pseudo_centroids_fps_pts
+#         num_ins, num_pseudo_centroids, fps_num = pseudo_centroids_fps_pts_ids.shape
+
+#         # prepare Pseudo_C groups of pts feat
+#         expanded_pts_ins_feat = pts_ins_feat.unsqueeze(1).repeat(1, num_pseudo_centroids, 1)
+#         expanded_pts_ins_ids = pts_ins_ids.unsqueeze(1).repeat(1, num_pseudo_centroids)
+#         expanded_pseudo_centroids_ins_ids = pseudo_centroids_ins_ids.unsqueeze(1).repeat(1, num_pseudo_centroids)
+
+#         pseudo_centroids_fps_pts_ids = pseudo_centroids_fps_pts_ids.view(-1) # (num_ins * num_pseudo_centroids * fps_num)
+#         pseudo_centroids_fps_pts = pts_ins_feat[pseudo_centroids_fps_pts_ids] # (num_ins * num_pseudo_centroids * fps_num, C)
+#         pseudo_centroids_fps_expand = pseudo_centroids.unsqueeze(2).repeat(1, 1, fps_num, 1).view(-1, 3)
+#         f_cluster = (pseudo_centroids_fps_pts[:, :3] - pseudo_centroids_fps_expand) / self.rel_dist_scaler 
+
+#         xyz_normalizer = torch.tensor(self.xyz_normalizer, device=pts_ins_feat.device, dtype=pts_ins_feat.dtype)
+#         features_ls = [torch.cat([pseudo_centroids_fps_pts[:, :3] / xyz_normalizer[None, :], pseudo_centroids_fps_pts[:, 3:]], dim=1)]
+#         # origin_point_coors = features[:, :3]
+#         if self.with_shortcut:
+#             shortcut = pseudo_centroids_fps_pts[:, 3:]
+
+#         # # distinguish different fps groups
+#         # pseudo_centroids_fps_ins_ids = pseudo_centroids_ins_ids.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, fps_num)
+#         # fps_ids_adder = (torch.arange(num_pseudo_centroids) * 1e5).to(pts_ins_feat.device).reshape(1, num_pseudo_centroids, 1)
+#         # pseudo_centroids_fps_ins_ids = pseudo_centroids_fps_ins_ids + fps_ids_adder # (num_ins * num_pseudo_centroids * fps_num)
+#         # pseudo_centroids_fps_ins_ids = pseudo_centroids_fps_ins_ids.view(-1)
+
+        
+        
+#         # # # make groups of pseudo centroids as f_cluster
+        
+#         # pseudo_fps_centroids, mean_coors, unq_inv = scatter_v2(pseudo_centroids_fps_pts[:, :3], pseudo_centroids_fps_ins_ids, mode='avg', sorted=False)
+#         # # pseudo_centroids should be same as mean coors
+#         # pts_ins_pseudo_centroids = self.map_voxel_center_to_point(pseudo_centroids, unq_inv) # shape: (N, Pseudo_C, 3)
+#         # f_cluster = (pts_ins_feat[:, None, :3] - pts_ins_pseudo_centroids) / self.rel_dist_scaler
+#         # f_cluster = f_cluster.view(f_cluster.shape[0], -1)
+        
+
+#         if self._with_cluster_center:
+#             features_ls.append(f_cluster / 10.0)
+
+#         if self._with_rel_mlp:
+#             features_ls[0] = features_ls[0] * self.rel_mlp(f_cluster)
+
+#         if self._with_distance:
+#             points_dist = torch.norm(pts_ins_feat[:, :3], 2, 1, keepdim=True)
+#             features_ls.append(points_dist)
+
+#         # Combine together feature decorations
+#         features = torch.cat(features_ls, dim=-1)
+
+#         voxel_feats_list = []         
+#         for i, vfe in enumerate(self.vfe_layers):
+#             point_feats = vfe(features)
+#             fps_point_feats = point_feats.view(num_ins, num_pseudo_centroids, fps_num, -1)
+#             pseudo_centroids_feats = fps_point_feats.max(2)[0]
+#             voxel_feats_list.append(pseudo_centroids_feats)
+#             if i != len(self.vfe_layers) - 1:
+#                 # need to concat voxel feats if it is not the last vfe
+#                 pseudo_centroids_feats_expanded = pseudo_centroids_feats.unsqueeze(2).expand_as(fps_point_feats)
+#                 features = torch.cat([point_feats, pseudo_centroids_feats_expanded.contiguous().view(num_ins*num_pseudo_centroids*fps_num, -1)], dim=1)
+
+#         voxel_feats = torch.cat(voxel_feats_list, dim=-1)
+#         # update pseudo_centroids feat using feat from last step / scale
+#         if self._cross_layer_update:
+#             # ipdb.set_trace()
+#             voxel_feats = self.gated_update(voxel_feats, last_pseudo_centroids_feat)
+
+#         if return_both:
+#             if self.with_shortcut:
+#                 point_feats = point_feats + shortcut
+#             return point_feats, voxel_feats
+#         else:
+#             return voxel_feats
+
+@VOXEL_ENCODERS.register_module()
+class IPFFormerLayer(nn.Module):
+
+    def __init__(self,
+                 in_channels=4,
+                 feat_channels=[],
+                 with_distance=False,
+                 with_cluster_center=False,
+                 with_rel_mlp=True,
+                 rel_mlp_hidden_dims=[16,],
+                 rel_mlp_in_channel=3,
+                 cross_layer_update=False,
+                 with_voxel_center=False,
+                 norm_cfg=dict(type='BN1d', eps=1e-3, momentum=0.01),
+                 mode='max',
+                 return_point_feats=False,
+                 return_inv=True,
+                 rel_dist_scaler=1.0,
+                 with_shortcut=True,
+                 xyz_normalizer=[1.0, 1.0, 1.0],
+                 act='relu',
+                 dropout=0.0,
+                 head_num=8
+                 ):
+        super(IPFFormerLayer, self).__init__()
+        # basic init
+        assert len(feat_channels) > 0
+        if with_cluster_center:
+            in_channels += 3
+        if with_voxel_center:
+            in_channels += 3
+        if with_distance:
+            in_channels += 3
+        self.in_channels = in_channels
+        self._with_distance = with_distance
+        self._with_cluster_center = with_cluster_center
+        self._with_voxel_center = with_voxel_center
+        self.return_point_feats = return_point_feats
+        self.fp16_enabled = False
+        # overwrite
+        self.scatter = None
+        self.vfe_scatter = None
+        self.cluster_scatter = None
+        self.rel_dist_scaler = rel_dist_scaler
+        self.mode = mode
+        self.with_shortcut = with_shortcut
+        self._with_rel_mlp = with_rel_mlp
+        self.xyz_normalizer = xyz_normalizer
+        if with_rel_mlp:
+            rel_mlp_hidden_dims.append(in_channels) # not self.in_channels
+            self.rel_mlp = build_mlp(rel_mlp_in_channel, rel_mlp_hidden_dims, norm_cfg, act=act)
+        self.align_channels = build_mlp(in_channels*2+64, [64], norm_cfg, act=act) # 64 is the feat dim of pts
+
+        if act != 'relu' or dropout > 0: # do not double in_filter
+            feat_channels = [self.in_channels] + list(feat_channels)
+            vfe_layers, centroids_pe = [], []
+            for i in range(len(feat_channels) - 1):
+                in_filters = feat_channels[i]
+                out_filters = feat_channels[i + 1]
+                if i > 0:
+                    in_filters *= 2
+
+                vfe_layers.append(
+                    Transformer_EncoderLayer(
+                        in_filters,
+                        out_filters,
+                        head_num,
+                        in_filters,
+                        in_filters,
+                        dropout=dropout,
+                    )
+                )
+                # make positional embeddings for pseudo centroids
+                centroids_pe.append(
+                    build_mlp(3, [in_filters], norm_cfg, act="sigmoid")
+                )
+            self.vfe_layers = nn.ModuleList(vfe_layers)
+            self.centroids_pe = nn.ModuleList(centroids_pe)
+            self.num_vfe = len(vfe_layers)
+        
+
+    def map_voxel_center_to_point(self, voxel_mean, voxel2point_inds):
+
+        return voxel_mean[voxel2point_inds]
+
+    def make_batch_input(self, seq_input, seq_batch_ids):
+        B = len(seq_batch_ids.unique())
+        batch_input, batch_mask = [], []
+        for i in range(B):
+            mask = (seq_batch_ids == i)
+            selected_input = seq_input[mask]
+            batch_input.append(selected_input)
+            batch_mask.append(torch.ones(len(selected_input), device=seq_input.device))
+        batch_input = pad_sequence(batch_input, batch_first=True, padding_value=0)
+        batch_mask = pad_sequence(batch_mask, batch_first=True, padding_value=0)
+        return batch_input, batch_mask.bool()
+
+    def make_sequence_input(self, batch_input, batch_in_mask):
+        
+        seq_input = [this_input[this_mask] for this_input, this_mask in zip(batch_input, batch_in_mask)]
+        seq_input = torch.cat(seq_input, dim=0)
+        return seq_input
+
+    # if out_fp16=True, the large numbers of points 
+    # lead to overflow error in following layers
+    @force_fp32(out_fp16=False)
+    def forward(self,
+                pts_ins_feat,
+                pts_ins_ids,
+                pseudo_centroids,
+                pseudo_centroids_ins_ids,
+                pseudo_centroids_fps_pts_ids,
+                pseudo_centroids_feat,
+                ins_batch_ids,
+                f_cluster=None,
+                points=None,
+                img_feats=None,
+                img_metas=None,
+                return_inv=False,
+                return_both=True,
+                unq_inv_once=None,
+                new_coors_once=None,
+        ):
+        shortcut = pts_ins_feat
+
+        # make centroids embedding for each instance point
+        num_ins, num_pseudo_centroids, fps_num = pseudo_centroids_fps_pts_ids.shape
+        expanded_pseudo_centroids = pseudo_centroids.view(num_ins*num_pseudo_centroids, 3)
+        xyz_normalizer = torch.tensor(self.xyz_normalizer, device=pts_ins_feat.device, dtype=pts_ins_feat.dtype)
+        expanded_pseudo_centroids = expanded_pseudo_centroids / xyz_normalizer[None, :]
+        expanded_ins_batch_ids = ins_batch_ids.unsqueeze(1).repeat(1, num_pseudo_centroids)
+        expanded_ins_batch_ids = expanded_ins_batch_ids.view(-1)
+
+        # # make dist matrix as attentional prior (only consider BEV dist)
+        # dist = expanded_pseudo_centroids[..., :2].unsqueeze(1) - expanded_pseudo_centroids[..., :2].unsqueeze(0)
+        # dist = torch.norm(dist, dim=-1, p=1)
+        # inverse_dist = 1 / (dist + 1e-3)
+        # inverse_dist = F.normalize(inverse_dist, p=2, dim=-1, eps=1e-5).detach()
+
+        pseudo_centroids_feats_list = []
+        in_feat = pseudo_centroids_feat.view(num_ins*num_pseudo_centroids, -1)
+        for i, vfe in enumerate(self.vfe_layers):
+            pe_feat = self.centroids_pe[i](expanded_pseudo_centroids)
+            in_feat_with_pe = in_feat + pe_feat
+            # make batch input : (B, N, C)
+            in_feat_with_pe, in_mask = self.make_batch_input(in_feat_with_pe, expanded_ins_batch_ids)
+            in_centroids, _ = self.make_batch_input(expanded_pseudo_centroids, expanded_ins_batch_ids)
+
+            # calculate dist matrix as attention prior (only consider BEV dist)
+            in_attn_mask = in_mask.unsqueeze(2) * in_mask.unsqueeze(1)
+            dist = torch.norm(in_centroids[..., :2].unsqueeze(2) - in_centroids[..., :2].unsqueeze(1), dim=-1, p=2)
+            inverse_dist = 1 / (dist + 1e-2)
+            inverse_dist = inverse_dist.masked_fill(in_attn_mask == 0, 0)
+            inverse_dist = F.normalize(inverse_dist, p=2, dim=-1).detach()
+            
+            out_feat, pseudo_attn = vfe(in_feat_with_pe, slf_attn_mask=in_attn_mask, prior_mask=inverse_dist)
+            # ipdb.set_trace()
+            # make sequence input for adding pe
+            out_feat = self.make_sequence_input(out_feat, in_mask)
+            pseudo_centroids_feats_list.append(out_feat)
+            in_feat = out_feat
+
+        pseudo_centroids_feat = torch.cat(pseudo_centroids_feats_list, dim=1)
+
+        # average all pseudo centroids feat for each instance
+        pseudo_centroids_feat = pseudo_centroids_feat.view(num_ins, num_pseudo_centroids, -1)
+        pseudo_centroids_feat_avg = pseudo_centroids_feat.mean(1) # (num_ins, C)
+
+        # augment original points with global attended pseudo centroids feats
+        assert unq_inv_once is not None
+        
+        global_feat_per_point = self.map_voxel_center_to_point(pseudo_centroids_feat_avg, unq_inv_once)
+        point_feats = torch.cat([pts_ins_feat, global_feat_per_point], dim=1)
+        point_feats = self.align_channels(point_feats)
+        # update pseudo_centroids feat using fenat from last step / scale
+        # leave for future design
+
+        if return_both:
+            if self.with_shortcut and point_feats.shape == shortcut.shape:
+                point_feats = point_feats + shortcut
+            return point_feats, pseudo_centroids_feat
+        else:
+            return pseudo_centroids_feat
+
+@VOXEL_ENCODERS.register_module()
+class IPFLayerMIX(nn.Module):
+
+    def __init__(self,
+                 in_channels=4,
+                 feat_channels=[],
+                 with_distance=False,
+                 with_cluster_center=False,
+                 with_rel_mlp=True,
+                 rel_mlp_hidden_dims=[16,],
+                 rel_mlp_in_channel=3,
+                 with_voxel_center=False,
+                 norm_cfg=dict(type='BN1d', eps=1e-3, momentum=0.01),
+                 mode='max',
+                 return_point_feats=False,
+                 return_inv=True,
+                 rel_dist_scaler=1.0,
+                 with_shortcut=True,
+                 xyz_normalizer=[1.0, 1.0, 1.0],
+                 act='relu',
+                 dropout=0.0,
+                 ):
+        super(IPFLayerMIX, self).__init__()
+        # basic init
+        assert len(feat_channels) > 0
+        if with_cluster_center:
+            in_channels += 3
+        if with_voxel_center:
+            in_channels += 3
+        if with_distance:
+            in_channels += 3
+        self.in_channels = in_channels
+        self._with_distance = with_distance
+        self._with_cluster_center = with_cluster_center
+        self._with_voxel_center = with_voxel_center
+        self.return_point_feats = return_point_feats
+        self.fp16_enabled = False
+        # overwrite
+        self.scatter = None
+        self.vfe_scatter = None
+        self.cluster_scatter = None
+        self.rel_dist_scaler = rel_dist_scaler
+        self.mode = mode
+        self.with_shortcut = with_shortcut
+        self._with_rel_mlp = with_rel_mlp
+        self.xyz_normalizer = xyz_normalizer
+        if with_rel_mlp:
+            rel_mlp_hidden_dims.append(in_channels) # not self.in_channels
+            self.rel_mlp = build_mlp(rel_mlp_in_channel, rel_mlp_hidden_dims, norm_cfg, act=act)
+        # if with_shortcut:
+        #     self.shortcut_align = build_mlp(feat_channels[-1], [in_channels], norm_cfg, act=act)
+        self.channel_align = build_mlp(feat_channels[-1], [in_channels], norm_cfg, act=act)
+        if act != 'relu' or dropout > 0: # do not double in_filter
+            feat_channels = [self.in_channels] + list(feat_channels)
+            vfe_layers = []
+            for i in range(len(feat_channels) - 1):
+                in_filters = feat_channels[i]
+                out_filters = feat_channels[i + 1]
+                if i > 0:
+                    in_filters *= 2
+
+                vfe_layers.append(
+                    DynamicVFELayerV2(
+                        in_filters,
+                        out_filters,
+                        norm_cfg,
+                        act=act,
+                        dropout=dropout,
+                    )
+                )
+            self.vfe_layers = nn.ModuleList(vfe_layers)
+            self.num_vfe = len(vfe_layers)
+        
+
+    def map_voxel_center_to_point(self, voxel_mean, voxel2point_inds):
+
+        return voxel_mean[voxel2point_inds]
+
+    # if out_fp16=True, the large numbers of points 
+    # lead to overflow error in following layers
+    @force_fp32(out_fp16=False)
+    def forward(self,
+                pts_ins_feat,
+                pts_ins_ids,
+                pseudo_centroids,
+                pseudo_centroids_ins_ids,
+                f_cluster=None,
+                points=None,
+                img_feats=None,
+                img_metas=None,
+                return_inv=False,
+                return_both=True,
+                unq_inv_once=None,
+                new_coors_once=None,
+                voxel_2D_feats=None,
+                inv_inds=None,
+                batch_ids=None
+        ):
+        
+        # fetch features from voxels
+        per_point_voxel_feats = voxel_2D_feats[inv_inds]
+
+        xyz_normalizer = torch.tensor(self.xyz_normalizer, device=pts_ins_feat.device, dtype=pts_ins_feat.dtype)
+        features_ls = [torch.cat([per_point_voxel_feats], dim=1)]
+        # origin_point_coors = features[:, :3]
+        if self.with_shortcut:
+            shortcut = torch.cat([pts_ins_feat[:, :3] / xyz_normalizer[None, :], pts_ins_feat[:, 3:]], dim=1)
+        
+        # # make groups of pseudo centroids as f_cluster
+        mean_centroids, mean_coors, unq_inv = scatter_v2(pts_ins_feat[:, :3], pts_ins_ids, mode='avg')
+
+        assert mean_coors.equal(pseudo_centroids_ins_ids)
+        
+        pts_ins_centroids = self.map_voxel_center_to_point(mean_centroids, unq_inv) # shape: (N, Pseudo_C, 3)
+        f_cluster = (pts_ins_feat[:, :3] - pts_ins_centroids) / self.rel_dist_scaler
+        
+        f_cluster = f_cluster.view(f_cluster.shape[0], -1) # shape: (N, 3)
+        # if f_cluster is None:
+        #     # # Find distance of x, y, and z from cluster center
+        #     # voxel_mean, mean_coors, unq_inv = scatter_v2(features[:, :3], coors, mode='avg', unq_inv=unq_inv_once, new_coors=new_coors_once)
+        #     # points_mean = self.map_voxel_center_to_point(
+        #     #     voxel_mean, unq_inv)
+        #     # # TODO: maybe also do cluster for reflectivity
+        #     # f_cluster = (features[:, :3] - points_mean[:, :3]) / self.rel_dist_scaler
+
+        #     # # make groups of pseudo centroids as f_cluster
+        #     pass 
+        # else:
+        #     f_cluster = f_cluster / self.rel_dist_scaler
+
+        if self._with_cluster_center:
+            features_ls.append(f_cluster / 10.0)
+
+        if self._with_rel_mlp:
+            features_ls[0] = features_ls[0] * self.rel_mlp(f_cluster)
+
+        if self._with_distance:
+            points_dist = torch.norm(pts_ins_feat[:, :3], 2, 1, keepdim=True)
+            features_ls.append(points_dist)
+
+        # Combine together feature decorations
+        features = torch.cat(features_ls, dim=-1)
+
+        voxel_feats_list = []
+        for i, vfe in enumerate(self.vfe_layers):
+            point_feats = vfe(features)
+
+            voxel_feats, voxel_coors, unq_inv = scatter_v2(point_feats, pts_ins_ids, mode=self.mode)
+            voxel_feats_list.append(voxel_feats)
+            if i != len(self.vfe_layers) - 1:
+                # need to concat voxel feats if it is not the last vfe
+                feat_per_point = self.map_voxel_center_to_point(voxel_feats, unq_inv)
+                features = torch.cat([point_feats, feat_per_point], dim=1)
+
+        voxel_feats = torch.cat(voxel_feats_list, dim=1)
+        
+        # return back to the original voxel features
+        per_point_voxel_feats_aug = self.channel_align(point_feats) + per_point_voxel_feats
+        
+        B = len(batch_ids.unique())
+        voxel_2D_feats_aug = []
+        for i in range(B):
+            this_batch_mask = (batch_ids == i)
+            this_batch_voxel_2D_feats_aug, _, _ = scatter_v2(per_point_voxel_feats_aug[this_batch_mask], inv_inds[this_batch_mask], mode='avg')
+            voxel_2D_feats_aug.append(this_batch_voxel_2D_feats_aug)
+        voxel_2D_feats_aug = torch.cat(voxel_2D_feats_aug, dim=0)
+        
+        return voxel_2D_feats_aug + voxel_2D_feats,  unq_inv
