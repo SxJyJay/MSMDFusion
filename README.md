@@ -59,6 +59,20 @@ sh ./tools/dist_test.sh ./configs/MSMDFusion_nusc_voxel_LC.py $ckpt_path$ 8 --ev
 
 For testing and making a submission to the leaderboard, please refer to the [official site](https://mmdetection3d.readthedocs.io/en/stable/datasets/nuscenes_det.html)
 
+### Results
+
+**3D Object Detection on nuScenes**
+|   Model   | Set | mAP  | NDS  | Result Files |
+| :-------: | :--: | :--: | :--: | :----------: |
+| MSMDFusion | val | 69.27 | 72.05 | [checkpoints](https://pan.baidu.com/s/1ZKUJ47ds3G4yfdNK5vLKPQ?pwd=n4mf) |
+| MSMDFusion | test | 71.49 | 73.96 | [predictions](https://pan.baidu.com/s/1gtuXRJKgzFU-MpvTk3WXcA?pwd=wgkv) |
+| MSMDFusion-TTA | test | 73.28 | 75.09 | [predictions](https://pan.baidu.com/s/1Swu1XuDfDUeXMqK11ec01g?pwd=b43u) |
+
+**3D Object Tracking on nuScenes**
+|   Model   | Set | AMOTA  | AMOTP  | Recall  | Result Files |
+| :-------: | :--: | :--: | :--: | :---: | :----------: |
+| MSMDFusion | test | 69.27 | 72.05 | 76.3| [predictions](https://pan.baidu.com/s/1UiJC6Hr_MmYvE2EQ2mEFTw?pwd=vcf3) |
+
 ## Citation
 If you find our paper useful, please cite:
 
