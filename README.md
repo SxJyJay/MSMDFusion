@@ -71,7 +71,7 @@ For testing and making a submission to the leaderboard, please refer to the [off
 **3D Object Tracking on nuScenes**
 |   Model   | Set | AMOTA  | AMOTP  | Recall  | Result Files |
 | :-------: | :--: | :--: | :--: | :---: | :----------: |
-| MSMDFusion | test | 69.27 | 54.87 | 76.30 | [predictions](https://pan.baidu.com/s/1UiJC6Hr_MmYvE2EQ2mEFTw?pwd=vcf3) |
+| MSMDFusion | test | 73.98 | 54.87 | 76.30 | [predictions](https://pan.baidu.com/s/1UiJC6Hr_MmYvE2EQ2mEFTw?pwd=vcf3) |
 
 ## Citation
 If you find our paper useful, please cite:
