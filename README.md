@@ -50,6 +50,7 @@ sh ./tools/dist_train.sh ./configs/transfusion_nusc_voxel_L.py 8
 # 2-nd stage training
 sh ./tools/dist_train.sh ./configs/MSMDFusion_nusc_voxel_LC.py 8
 ```
+**Notice**: When training the 1-st stage of TransFusion-L, please follow the copy-and-paste fade strategy as suggested [here](https://github.com/XuyangBai/TransFusion/issues/7#issuecomment-1114113329).
 
 For evaluation, you can use the following command:
 ```
