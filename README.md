@@ -1,6 +1,6 @@
 # MSMDFusion
 
-Official implementation of TransFusion for CVPR'2023 paper ["MSMDFusion: Fusing LiDAR and Camera at Multiple Scales with Multi-Depth Seeds for 3D Object Detection"](https://arxiv.org/abs/2209.03102), by Yang Jiao, Zequn Jie, Shaoxiang Chen, Jingjing Chen, Lin Ma, and Yu-Gang Jiang.
+Official implementation of our CVPR'2023 paper ["MSMDFusion: Fusing LiDAR and Camera at Multiple Scales with Multi-Depth Seeds for 3D Object Detection"](https://arxiv.org/abs/2209.03102), by Yang Jiao, Zequn Jie, Shaoxiang Chen, Jingjing Chen, Lin Ma, and Yu-Gang Jiang.
 ![MSMDFusion framework](https://github.com/SxJyJay/MSMDFusion/blob/main/MSMD-Framework.png)
 
 
