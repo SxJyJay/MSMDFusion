@@ -114,7 +114,6 @@ def main():
         raise ValueError('The output file must be a pkl file.')
 
     cfg = Config.fromfile(args.config)
-    cfg.data.test.ann_file = 'data/nuscenes/nuscenes_infos_train.pkl'
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
     # import modules from string list.
