@@ -80,7 +80,7 @@ For testing and making a submission to the leaderboard, please refer to the [off
 If you find our paper useful, please cite:
 
 ```bash
-@inproceedings{msmdfusion,
+@inproceedings{jiao2023msmdfusion,
   title={MSMDFusion: Fusing LiDAR and Camera at Multiple Scales with Multi-Depth Seeds for 3D Object Detection},
   author={Jiao, Yang and Jie, Zequn and Chen, Shaoxiang and Chen, Jingjing and Ma, Lin and Jiang, Yu-Gang},
   booktitle = {Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR)},
